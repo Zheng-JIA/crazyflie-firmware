@@ -7,7 +7,8 @@
 # CFLAGS += -DDEBUG_PRINT_ON_UART
 
 ## Load a deck driver that has no OW memory
-# CFLAGS += -DDECK_FORCE=bcBuzzer
+CFLAGS += -DDECK_FORCE=viconleddeck
+PROJ_OBJ += viconleddeck.o
 
 ## Enable biq quad deck features
 # CFLAGS += -DENABLE_BQ_DECK
@@ -20,3 +21,5 @@
 
 ## Automatically reboot to bootloader before flashing
 # CLOAD_CMDS = -w radio://0/100/2M/E7E7E7E7E7
+
+ESTIMATOR = kalman
