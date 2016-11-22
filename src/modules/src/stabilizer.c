@@ -23,6 +23,8 @@
  *
  *
  */
+#define CONTROLLER_TYPE_new
+
 #include <math.h>
 
 #include "FreeRTOS.h"
@@ -35,16 +37,21 @@
 #include "stabilizer.h"
 
 #include "sensors.h"
-#include "commander.h"
 #include "ext_position.h"
-#include "sitaw.h"
-#include "controller.h"
 #include "power_distribution.h"
 
 #ifdef ESTIMATOR_TYPE_kalman
 #include "estimator_kalman.h"
 #else
 #include "estimator.h"
+#endif
+
+#ifdef CONTROLLER_TYPE_new
+#include "controller_new.h"
+#else
+#include "commander.h"
+#include "controller.h"
+#include "sitaw.h"
 #endif
 
 static bool isInit;
@@ -108,22 +115,30 @@ static void stabilizerTask(void* param)
     vTaskDelayUntil(&lastWakeTime, F2T(RATE_MAIN_LOOP));
   }
 
+  // main stabilization loop
   while(1) {
     vTaskDelayUntil(&lastWakeTime, F2T(RATE_MAIN_LOOP));
 
+#ifndef CONTROLLER_TYPE_new
     getExtPosition(&state);
+#endif
+    
 #ifdef ESTIMATOR_TYPE_kalman
     stateEstimatorUpdate(&state, &sensorData, &control);
 #else
     sensorsAcquire(&sensorData, tick);
     stateEstimator(&state, &sensorData, tick);
 #endif
-
+    
+#ifdef CONTROLLER_TYPE_new
+    stateControllerUpdateStateWithExternalPosition();
+    stateControllerRun(&control, &sensorData, &state);
+#else
     commanderGetSetpoint(&setpoint, &state);
-
     sitAwUpdateSetpoint(&setpoint, &sensorData, &state);
-
     stateController(&control, &sensorData, &state, &setpoint, tick);
+#endif
+    
     powerDistribution(&control);
 
     tick++;
