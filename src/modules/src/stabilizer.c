@@ -134,9 +134,14 @@ static void stabilizerTask(void* param)
 #else
     commanderGetSetpoint(&setpoint, &state);
     sitAwUpdateSetpoint(&setpoint, &sensorData, &state);
+<<<<<<< HEAD
     stateController(&control, &sensorData, &state, &setpoint, tick);
 #endif
     
+=======
+
+    stateController(&control, &setpoint, &sensorData, &state, tick);
+>>>>>>> ce8aee63fd4f44f9f31434ba843e3f6267940f07
     powerDistribution(&control);
 
     tick++;

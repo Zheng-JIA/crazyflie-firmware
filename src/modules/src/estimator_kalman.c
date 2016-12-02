@@ -141,6 +141,15 @@ static inline bool stateEstimatorHasTDOAPacket(tdoaMeasurement_t *uwb) {
   return (pdTRUE == xQueueReceive(tdoaDataQueue, uwb, 0));
 }
 
+// Measurements of TOF from laser sensor
+static xQueueHandle tofDataQueue;
+#define TOF_QUEUE_LENGTH (10)
+
+static void stateEstimatorUpdateWithTof(tofMeasurement_t *tof);
+
+static inline bool stateEstimatorHasTOFPacket(tofMeasurement_t *tof) {
+  return (pdTRUE == xQueueReceive(tofDataQueue, tof, 0));
+}
 
 /**
  * Constants used in the estimator
@@ -260,8 +269,6 @@ static float varSkew;
 static uint32_t lastFlightCmd;
 static uint32_t takeoffTime;
 static uint32_t tdoaCount;
-
-
 
 /**
  * Supporting and utility functions
@@ -421,6 +428,13 @@ void stateEstimatorUpdate(state_t *state, sensorData_t *sensors, control_t *cont
    * we therefore consume all measurements since the last loop, rather than accumulating
    */
 
+  tofMeasurement_t tof;
+  while (stateEstimatorHasTOFPacket(&tof))
+  {
+    stateEstimatorUpdateWithTof(&tof);
+    doneUpdate = true;
+  }
+  
   distanceMeasurement_t dist;
   while (stateEstimatorHasDistanceMeasurement(&dist))
   {
@@ -441,7 +455,6 @@ void stateEstimatorUpdate(state_t *state, sensorData_t *sensors, control_t *cont
     stateEstimatorUpdateWithTDOA(&tdoa);
     doneUpdate = true;
   }
-
 
   /**
    * If an update has been made, the state is finalized:
@@ -619,45 +632,59 @@ static void stateEstimatorPredict(float cmdThrust, Axis3f *acc, Axis3f *gyro, fl
   }
   quadIsFlying = (xTaskGetTickCount()-lastFlightCmd) < IN_FLIGHT_TIME_THRESHOLD;
 
+  float dx, dy, dz;
+  float tmpSPX, tmpSPY, tmpSPZ;
+  float zacc;
+
   if (quadIsFlying) // only acceleration in z direction
   {
     // TODO: In the next lines, can either use cmdThrust/mass, or acc->z. Need to test which is more reliable.
     // cmdThrust's error comes from poorly calibrated mass, and inexact cmdThrust -> thrust map
     // acc->z's error comes from measurement noise and accelerometer scaling
     // float zacc = cmdThrust;
-    float zacc = acc->z;
+    zacc = acc->z;
 
     // position updates in the body frame (will be rotated to inertial frame)
-    float dx = S[STATE_PX] * dt;
-    float dy = S[STATE_PY] * dt;
-    float dz = S[STATE_PZ] * dt + zacc * dt2 / 2.0f; // thrust can only be produced in the body's Z direction
+    dx = S[STATE_PX] * dt;
+    dy = S[STATE_PY] * dt;
+    dz = S[STATE_PZ] * dt + zacc * dt2 / 2.0f; // thrust can only be produced in the body's Z direction
 
     // position update
     S[STATE_X] += R[0][0] * dx + R[0][1] * dy + R[0][2] * dz;
     S[STATE_Y] += R[1][0] * dx + R[1][1] * dy + R[1][2] * dz;
     S[STATE_Z] += R[2][0] * dx + R[2][1] * dy + R[2][2] * dz - GRAVITY_MAGNITUDE * dt2 / 2.0f;
 
+    // keep previous time step's state for the update
+    tmpSPX = S[STATE_PX];
+    tmpSPY = S[STATE_PY];
+    tmpSPZ = S[STATE_PZ];
+
     // body-velocity update: accelerometers + gyros cross velocity - gravity in body frame
-    S[STATE_PX] += dt * (gyro->z * S[STATE_PY] - gyro->y * S[STATE_PZ] - GRAVITY_MAGNITUDE * R[2][0]);
-    S[STATE_PY] += dt * (gyro->z * S[STATE_PX] + gyro->x * S[STATE_PZ] - GRAVITY_MAGNITUDE * R[2][1]);
-    S[STATE_PZ] += dt * (zacc + gyro->y * S[STATE_PX] - gyro->x * S[STATE_PY] - GRAVITY_MAGNITUDE * R[2][2]);
+    S[STATE_PX] += dt * (gyro->z * tmpSPY - gyro->y * tmpSPZ - GRAVITY_MAGNITUDE * R[2][0]);
+    S[STATE_PY] += dt * (gyro->z * tmpSPX + gyro->x * tmpSPZ - GRAVITY_MAGNITUDE * R[2][1]);
+    S[STATE_PZ] += dt * (zacc + gyro->y * tmpSPX - gyro->x * tmpSPY - GRAVITY_MAGNITUDE * R[2][2]);
   }
   else // Acceleration can be in any direction, as measured by the accelerometer. This occurs, eg. in freefall or while being carried.
   {
     // position updates in the body frame (will be rotated to inertial frame)
-    float dx = S[STATE_PX] * dt + acc->x * dt2 / 2.0f;
-    float dy = S[STATE_PY] * dt + acc->y * dt2 / 2.0f;
-    float dz = S[STATE_PZ] * dt + acc->z * dt2 / 2.0f; // thrust can only be produced in the body's Z direction
+    dx = S[STATE_PX] * dt + acc->x * dt2 / 2.0f;
+    dy = S[STATE_PY] * dt + acc->y * dt2 / 2.0f;
+    dz = S[STATE_PZ] * dt + acc->z * dt2 / 2.0f; // thrust can only be produced in the body's Z direction
 
     // position update
     S[STATE_X] += R[0][0] * dx + R[0][1] * dy + R[0][2] * dz;
     S[STATE_Y] += R[1][0] * dx + R[1][1] * dy + R[1][2] * dz;
     S[STATE_Z] += R[2][0] * dx + R[2][1] * dy + R[2][2] * dz - GRAVITY_MAGNITUDE * dt2 / 2.0f;
 
+    // keep previous time step's state for the update
+    tmpSPX = S[STATE_PX];
+    tmpSPY = S[STATE_PY];
+    tmpSPZ = S[STATE_PZ];
+
     // body-velocity update: accelerometers + gyros cross velocity - gravity in body frame
-    S[STATE_PX] += dt * (acc->x + gyro->z * S[STATE_PY] - gyro->y * S[STATE_PZ] - GRAVITY_MAGNITUDE * R[2][0]);
-    S[STATE_PY] += dt * (acc->y + gyro->z * S[STATE_PX] + gyro->x * S[STATE_PZ] - GRAVITY_MAGNITUDE * R[2][1]);
-    S[STATE_PZ] += dt * (acc->z + gyro->y * S[STATE_PX] - gyro->x * S[STATE_PY] - GRAVITY_MAGNITUDE * R[2][2]);
+    S[STATE_PX] += dt * (acc->x + gyro->z * tmpSPY - gyro->y * tmpSPZ - GRAVITY_MAGNITUDE * R[2][0]);
+    S[STATE_PY] += dt * (acc->y + gyro->z * tmpSPX + gyro->x * tmpSPZ - GRAVITY_MAGNITUDE * R[2][1]);
+    S[STATE_PZ] += dt * (acc->z + gyro->y * tmpSPX - gyro->x * tmpSPY - GRAVITY_MAGNITUDE * R[2][2]);
   }
 
   if(S[STATE_Z] < 0) {
@@ -909,6 +936,32 @@ static void stateEstimatorUpdateWithTDOA(tdoaMeasurement_t *tdoa)
   tdoaCount++;
 }
 
+static void stateEstimatorUpdateWithTof(tofMeasurement_t *tof)
+{
+  // Updates the filter with a measured distance in the zb direction using the
+  float h[STATE_DIM] = {0};
+  arm_matrix_instance_f32 H = {1, STATE_DIM, h};
+
+  // Only update the filter if the measurement is reliable (\hat{h} -> infty when R[2][2] -> 0)
+  if (fabs(R[2][2]) > 0.1 && R[2][2] > 0){
+    float angleOfApterure = 10 * DEG_TO_RAD; // Half aperture angle radians
+    float alpha = acosf(R[2][2]) - angleOfApterure;
+    if (alpha < 0.0f){
+      alpha = 0.0f;
+    }
+    float predictedDistance = S[STATE_Z] / cosf(alpha);
+    float measuredDistance = tof->distance; // [m]
+
+    //Measurement equation
+    //
+    // h = z/((R*z_b)\dot z_b) = z/cos(alpha)
+    h[STATE_Z] = 1 / cosf(alpha); 
+    
+    // Scalar update
+    stateEstimatorScalarUpdate(&H, measuredDistance-predictedDistance, tof->stdDev);
+  }
+}
+
 static void stateEstimatorFinalize(sensorData_t *sensors, uint32_t tick)
 {
   // Matrix to rotate the attitude covariances once updated
@@ -1093,12 +1146,14 @@ void stateEstimatorInit(void) {
     distDataQueue = xQueueCreate(DIST_QUEUE_LENGTH, sizeof(distanceMeasurement_t));
     posDataQueue = xQueueCreate(POS_QUEUE_LENGTH, sizeof(positionMeasurement_t));
     tdoaDataQueue = xQueueCreate(UWB_QUEUE_LENGTH, sizeof(tdoaMeasurement_t));
+    tofDataQueue = xQueueCreate(TOF_QUEUE_LENGTH, sizeof(tofMeasurement_t));
   }
   else
   {
     xQueueReset(distDataQueue);
     xQueueReset(posDataQueue);
     xQueueReset(tdoaDataQueue);
+    xQueueReset(tofDataQueue);
   }
 
   lastPrediction = xTaskGetTickCount();
@@ -1191,6 +1246,12 @@ bool stateEstimatorEnqueuePosition(positionMeasurement_t *pos)
 bool stateEstimatorEnqueueDistance(distanceMeasurement_t *dist)
 {
   return stateEstimatorEnqueueExternalMeasurement(distDataQueue, (void *)dist);
+}
+
+bool stateEstimatorEnqueueTOF(tofMeasurement_t *tof)
+{
+  // A distance (distance) [m] to the ground along the z_B axis.
+  return stateEstimatorEnqueueExternalMeasurement(tofDataQueue, (void *)tof);
 }
 
 bool stateEstimatorTest(void)
